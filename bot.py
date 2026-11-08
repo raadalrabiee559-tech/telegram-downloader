@@ -5,10 +5,10 @@ import threading
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
-from telebot import apihelper
+from telebot import apihelper, types
 import yt_dlp
 
-# خادم مصغر ليتعرف Render على أن الخدمة تعمل بنجاح
+# 1. خادم مصغر لمنع Render من إيقاف الخدمة
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -22,10 +22,10 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-# دالة التنبيه الذاتي كل 10 دقائق ليبقى السيرفر شغالاً 24 ساعة
+# 2. التنبيه الذاتي كل 10 دقائق ليبقى البوت حياً 24 ساعة
 def keep_alive_ping():
     while True:
-        time.sleep(600)  # كل 10 دقائق
+        time.sleep(600)
         try:
             urllib.request.urlopen("https://telegram-downloader-0owh.onrender.com", timeout=15)
         except Exception:
@@ -33,7 +33,7 @@ def keep_alive_ping():
 
 threading.Thread(target=keep_alive_ping, daemon=True).start()
 
-# إعدادات البوت
+# 3. إعدادات تلجرام
 apihelper.CONNECT_TIMEOUT = 120
 apihelper.READ_TIMEOUT = 600
 
@@ -43,89 +43,147 @@ bot = telebot.TeleBot(BOT_TOKEN)
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# ذاكرة مؤقتة لحفظ روابط المستخدمين أثناء الاختيار
+USER_URLS = {}
+
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     bot.reply_to(
         message, 
-        "أهلاً بك! 🎥\nأرسل لي رابط أي فيديو (TikTok, Instagram, YouTube, X, Facebook) وسأقوم بتحميله بسرعة فوراً عبر السحابة."
+        "أهلاً بك يا بطل! 🚀\n\nأرسل لي أي رابط من (TikTok, Instagram, YouTube, X, Facebook) وستظهر لك خيارات التحميل فوراً (فيديو بجودات مختلفة أو صوت MP3)."
     )
 
 @bot.message_handler(func=lambda message: True)
-def handle_social_media_link(message):
+def handle_link_request(message):
     url = message.text.strip()
 
     if not url.startswith(("http://", "https://")):
-        bot.reply_to(message, "يرجى إرسال رابط صحيح يبدأ بـ http أو https")
+        bot.reply_to(message, "⚠️ يرجى إرسال رابط صحيح يبدأ بـ http أو https")
         return
 
-    status_msg = bot.reply_to(message, "⏳ جاري التنزيل بالسيرفر السحابي بأقصى سرعة...")
-    file_template = os.path.join(DOWNLOAD_DIR, f"{message.chat.id}_%(id)s.%(ext)s")
+    wait_msg = bot.reply_to(message, "🔍 جاري فحص الرابط واستخراج خيارات التحميل...")
 
-    ydl_opts = {
-        'format': 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[height<=720]/best',
-        'outtmpl': file_template,
-        'merge_output_format': 'mp4',
-        'quiet': True,
-        'no_warnings': True,
-        'max_filesize': 50 * 1024 * 1024,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'web_safari'],
-            }
-        },
-    }
+    try:
+        # استخراج معلومات الفيديو بسرعة دون تحميل
+        ydl_info_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extractor_args': {'youtube': {'player_client': ['ios', 'web_safari']}},
+        }
+        with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            title = info.get('title', 'مقطع فيديو')
+            duration = info.get('duration', 0)
 
+        # حفظ الرابط في الذاكرة
+        USER_URLS[message.chat.id] = {"url": url, "title": title, "duration": duration}
+
+        # بناء الأزرار التفاعلية
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_720 = types.InlineKeyboardButton("🎬 فيديو عالي (720p)", callback_data="dl_720")
+        btn_480 = types.InlineKeyboardButton("📱 فيديو سريع (480p)", callback_data="dl_480")
+        btn_mp3 = types.InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data="dl_mp3")
+        markup.add(btn_720, btn_480)
+        markup.add(btn_mp3)
+
+        duration_text = f"{int(duration // 60)}:{int(duration % 60):02d}" if duration else "غير محدد"
+        caption = f"📌 **{title[:120]}**\n⏱ المدة: {duration_text}\n\n👇 اختر صيغة التحميل المطلوبة:"
+
+        bot.edit_message_text(caption, chat_id=message.chat.id, message_id=wait_msg.message_id, reply_markup=markup, parse_mode="Markdown")
+
+    except Exception as e:
+        bot.edit_message_text(f"❌ تعذر استخراج بيانات المقطع: {str(e)[:120]}", chat_id=message.chat.id, message_id=wait_msg.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
+def handle_download_option(call):
+    chat_id = call.message.chat.id
+    if chat_id not in USER_URLS:
+        bot.answer_callback_query(call.id, "⚠️ انتهت صلاحية هذا الطلب، أرسل الرابط مجدداً.", show_alert=True)
+        return
+
+    data = USER_URLS[chat_id]
+    url = data["url"]
+    title = data["title"]
+    duration = data["duration"]
+    choice = call.data
+
+    bot.answer_callback_query(call.id, "⏳ جاري بدء التحميل والمعالجة...")
+    status_msg = bot.send_message(chat_id, "⏳ جاري التنزيل بالسيرفر السحابي بأقصى سرعة...")
+
+    file_prefix = f"{chat_id}_{int(time.time())}"
     downloaded_file = None
 
     try:
+        if choice == "dl_mp3":
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(DOWNLOAD_DIR, f"{file_prefix}.%(ext)s"),
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True,
+                'no_warnings': True,
+                'max_filesize': 50 * 1024 * 1024,
+                'extractor_args': {'youtube': {'player_client': ['ios', 'web_safari']}},
+            }
+        elif choice == "dl_720":
+            ydl_opts = {
+                'format': 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+                'outtmpl': os.path.join(DOWNLOAD_DIR, f"{file_prefix}.%(ext)s"),
+                'merge_output_format': 'mp4',
+                'quiet': True,
+                'no_warnings': True,
+                'max_filesize': 50 * 1024 * 1024,
+                'extractor_args': {'youtube': {'player_client': ['ios', 'web_safari']}},
+            }
+        else: # dl_480
+            ydl_opts = {
+                'format': 'best[height<=480][ext=mp4]/bestvideo[height<=480]+bestaudio/best[height<=480]/best',
+                'outtmpl': os.path.join(DOWNLOAD_DIR, f"{file_prefix}.%(ext)s"),
+                'merge_output_format': 'mp4',
+                'quiet': True,
+                'no_warnings': True,
+                'max_filesize': 50 * 1024 * 1024,
+                'extractor_args': {'youtube': {'player_client': ['ios', 'web_safari']}},
+            }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_title = info.get('title', 'فيديو')
-            duration = info.get('duration')
-            video_duration = int(duration) if duration else None
+            ydl.download([url])
 
-            pattern = os.path.join(DOWNLOAD_DIR, f"{message.chat.id}_{info['id']}.*")
-            matching_files = glob.glob(pattern)
+        # العثور على الملف الناتج
+        matching = glob.glob(os.path.join(DOWNLOAD_DIR, f"{file_prefix}.*"))
+        if not matching:
+            raise FileNotFoundError("لم يتم العثور على الملف بعد التنزيل.")
+        downloaded_file = matching[0]
 
-            if not matching_files:
-                raise FileNotFoundError("لم يتم العثور على ملف الفيديو.")
+        bot.edit_message_text("📤 تم التنزيل بنجاح! جاري الإرسال لتلجرام...", chat_id=chat_id, message_id=status_msg.message_id)
 
-            downloaded_file = matching_files[0]
-
-        bot.edit_message_text("📤 تم التحميل في ثوانٍ! جاري الإرسال لتلجرام...", chat_id=message.chat.id, message_id=status_msg.message_id)
-
-        uploaded = False
-        for _ in range(3):
-            try:
-                with open(downloaded_file, 'rb') as video:
-                    bot.send_video(
-                        message.chat.id,
-                        video,
-                        caption=f"🎬 {video_title[:200]}",
-                        duration=video_duration,
-                        supports_streaming=True,
-                        timeout=300
-                    )
-                uploaded = True
-                break
-            except Exception:
-                time.sleep(2)
-
-        if not uploaded:
-            with open(downloaded_file, 'rb') as doc:
-                bot.send_document(
-                    message.chat.id,
-                    doc,
-                    caption=f"🎬 {video_title[:200]}",
-                    timeout=300
+        # الإرسال بناءً على النوع
+        if choice == "dl_mp3":
+            with open(downloaded_file, 'rb') as audio:
+                bot.send_audio(
+                    chat_id,
+                    audio,
+                    title=title[:100],
+                    duration=int(duration) if duration else None,
+                    caption=f"🎵 {title[:150]}"
+                )
+        else:
+            with open(downloaded_file, 'rb') as video:
+                bot.send_video(
+                    chat_id,
+                    video,
+                    caption=f"🎬 {title[:150]}",
+                    duration=int(duration) if duration else None,
+                    supports_streaming=True
                 )
 
-        bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
+        bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
 
-    except yt_dlp.utils.DownloadError as de:
-        bot.edit_message_text(f"❌ تعذر التنزيل من المصدر: {str(de)[:120]}", chat_id=message.chat.id, message_id=status_msg.message_id)
     except Exception as e:
-        bot.edit_message_text(f"❌ حدث خطأ: {str(e)[:120]}", chat_id=message.chat.id, message_id=status_msg.message_id)
+        bot.edit_message_text(f"❌ حدث خطأ أثناء التحميل: {str(e)[:120]}", chat_id=chat_id, message_id=status_msg.message_id)
     finally:
         if downloaded_file and os.path.exists(downloaded_file):
             try:
@@ -134,5 +192,5 @@ def handle_social_media_link(message):
                 pass
 
 if __name__ == "__main__":
-    print("البوت السحابي يعمل الآن ومحمي ضد الخمول...")
+    print("البوت الاحترافي المتقدم يعمل الآن...")
     bot.infinity_polling()

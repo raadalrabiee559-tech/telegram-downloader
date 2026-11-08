@@ -2,6 +2,7 @@ import os
 import glob
 import time
 import threading
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import apihelper
@@ -20,6 +21,17 @@ def run_health_server():
     server.serve_forever()
 
 threading.Thread(target=run_health_server, daemon=True).start()
+
+# دالة التنبيه الذاتي كل 10 دقائق ليبقى السيرفر شغالاً 24 ساعة
+def keep_alive_ping():
+    while True:
+        time.sleep(600)  # كل 10 دقائق
+        try:
+            urllib.request.urlopen("https://telegram-downloader-0owh.onrender.com", timeout=15)
+        except Exception:
+            pass
+
+threading.Thread(target=keep_alive_ping, daemon=True).start()
 
 # إعدادات البوت
 apihelper.CONNECT_TIMEOUT = 120
@@ -56,6 +68,11 @@ def handle_social_media_link(message):
         'quiet': True,
         'no_warnings': True,
         'max_filesize': 50 * 1024 * 1024,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'web_safari'],
+            }
+        },
     }
 
     downloaded_file = None
@@ -117,5 +134,5 @@ def handle_social_media_link(message):
                 pass
 
 if __name__ == "__main__":
-    print("البوت السحابي يعمل الآن...")
+    print("البوت السحابي يعمل الآن ومحمي ضد الخمول...")
     bot.infinity_polling()

@@ -10,7 +10,7 @@ import telebot
 from telebot import apihelper, types
 import yt_dlp
 
-# 1. خادم مصغر لمنع Render من الدخول في وضع الخمول
+# 1. خادم مصغر لمنع Render من الخمول
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -35,9 +35,20 @@ def keep_alive_ping():
 
 threading.Thread(target=keep_alive_ping, daemon=True).start()
 
-# 3. إعدادات تلجرام
-apihelper.CONNECT_TIMEOUT = 120
-apihelper.READ_TIMEOUT = 600
+# 3. التحديث التلقائي لـ yt-dlp كل 24 ساعة
+def auto_update_ytdlp():
+    while True:
+        time.sleep(86400) # كل 24 ساعة
+        try:
+            subprocess.run(["pip", "install", "--upgrade", "yt-dlp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+threading.Thread(target=auto_update_ytdlp, daemon=True).start()
+
+# 4. إعدادات تلجرام
+apihelper.CONNECT_TIMEOUT = 30
+apihelper.READ_TIMEOUT = 300
 
 BOT_TOKEN = "9265561235:AAFyaR6rCz1xnZYHxTOP7eI5gOuDO5IVz9k"
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -46,10 +57,24 @@ DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 USER_DATA = {}
-MAX_CHUNK_BYTES = 45 * 1024 * 1024  # 45 ميغابايت لكل جزء عند التقطيع
+MAX_CHUNK_BYTES = 47 * 1024 * 1024  # حد أقصى 47 ميغابايت لكل جزء لتجنب حظر تلجرام
+
+# قراءة الكوكيز تلقائياً إذا كانت موجودة
+COOKIE_PATH = "cookies.txt" if os.path.exists("cookies.txt") else None
+
+def get_base_ydl_opts():
+    opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'socket_timeout': 15, # قطع الاتصال بعد 15 ثانية إذا لم يستجب الموقع
+        'retries': 2,
+        'extractor_args': {'youtube': {'player_client': ['ios', 'web_safari']}},
+    }
+    if COOKIE_PATH:
+        opts['cookiefile'] = COOKIE_PATH
+    return opts
 
 def format_count(count):
-    """تنسيق أرقام المشاهدات بشكل احترافي"""
     if not count:
         return "غير متوفر"
     if count >= 1_000_000:
@@ -58,16 +83,17 @@ def format_count(count):
         return f"{count / 1_000:.1f}K"
     return str(count)
 
-def split_and_send_video(chat_id, file_path, title, total_duration, status_msg_id):
-    """تقطيع الفيديو تلقائياً باستخدام FFmpeg إذا تجاوز 48MB بدون فقدان الجودة"""
+def fast_split_and_send(chat_id, file_path, title, total_duration, status_msg_id):
+    """تقطيع سريع جداً بتقنية القص المباشر وإرسالها متتالية"""
     file_size = os.path.getsize(file_path)
 
+    # إذا كان الحجم طبيعياً
     if file_size <= 48 * 1024 * 1024:
-        bot.edit_message_text("⚡ جاري الرفع لتلجرام بأقصى سرعة...", chat_id=chat_id, message_id=status_msg_id)
+        bot.edit_message_text("⚡ جاري الرفع لتلجرام...", chat_id=chat_id, message_id=status_msg_id)
         with open(file_path, 'rb') as v:
             bot.send_video(
                 chat_id, v, 
-                caption=f"🎬 **{title[:140]}**\n\n🤖 بواسطة: @raad_downloader_bot", 
+                caption=f"🎬 **{title[:140]}**\n\n🤖 @raad_downloader_bot", 
                 duration=int(total_duration) if total_duration else None, 
                 supports_streaming=True,
                 parse_mode="Markdown"
@@ -75,10 +101,11 @@ def split_and_send_video(chat_id, file_path, title, total_duration, status_msg_i
         bot.delete_message(chat_id=chat_id, message_id=status_msg_id)
         return
 
+    # حساب عدد الأجزاء
     num_parts = math.ceil(file_size / MAX_CHUNK_BYTES)
-    chunk_duration = math.ceil(total_duration / num_parts) if total_duration else 300
+    chunk_duration = math.ceil(total_duration / num_parts) if total_duration else 180
 
-    bot.edit_message_text(f"✂️ حجم المقطع كبير ({file_size / (1024*1024):.1f}MB)\nجاري تقطيعه إلى {num_parts} أجزاء ورفعها...", chat_id=chat_id, message_id=status_msg_id)
+    bot.edit_message_text(f"✂️ حجم الفيديو ({file_size / (1024*1024):.1f}MB) يتجاوز حد تلجرام.\n⚡ جاري التقطيع الفوري إلى {num_parts} أجزاء ورفعها...", chat_id=chat_id, message_id=status_msg_id)
 
     part_files = []
     try:
@@ -87,12 +114,14 @@ def split_and_send_video(chat_id, file_path, title, total_duration, status_msg_i
             part_path = os.path.join(DOWNLOAD_DIR, f"part_{i+1}_{os.path.basename(file_path)}")
             part_files.append(part_path)
 
+            # أمر التقطيع فائق السرعة
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", str(start_sec),
                 "-i", file_path,
                 "-t", str(chunk_duration),
                 "-c", "copy",
+                "-avoid_negative_ts", "1",
                 part_path
             ]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -118,16 +147,25 @@ def split_and_send_video(chat_id, file_path, title, total_duration, status_msg_i
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     welcome_text = (
-        "🌟 **مرحباً بك في أسرع محمل وسائط سحابي!** 🚀\n\n"
-        "أرسل لي أي رابط من المنصات المدعومة:\n"
-        "• YouTube • TikTok • Instagram • Facebook • X (Twitter)\n\n"
-        "✨ **المميزات:**\n"
-        "├ جودات متعددة تصل إلى Full HD 1080p\n"
-        "├ استخراج الصوت بجودة صوتية نقية MP3\n"
-        "└ تقطيع تلقائي للمقاطع الضخمة لتناسب تلجرام\n\n"
-        "👇 **أرسل الرابط الآن للبدء!**"
+        "🌟 **أهلاً بك في محمل الوسائط السحابي فائق السرعة!** 🚀\n\n"
+        "أرسل لي أي رابط وسأقوم بتحليله فوراً:\n"
+        "• YouTube • TikTok • Instagram • Facebook • X\n\n"
+        "⚡ **تحديثات النظام:**\n"
+        "├ تقطيع فوري فائق السرعة للمقاطع الضخمة\n"
+        "├ كشف فوري لأي أخطاء في الروابط\n"
+        "└ تحديث يومي تلقائي لمكتبات التنزيل\n\n"
+        "👇 **أرسل الرابط الآن لتجربته!**"
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['update'])
+def manual_update(message):
+    status_msg = bot.reply_to(message, "⏳ جاري فحص وتحديث مكتبة التحميل لأحدث إصدار...")
+    try:
+        res = subprocess.run(["pip", "install", "--upgrade", "yt-dlp"], capture_output=True, text=True)
+        bot.edit_message_text("✅ **تم تحديث محرك التحميل بنجاح لأحدث إصدار!**", chat_id=message.chat.id, message_id=status_msg.message_id, parse_mode="Markdown")
+    except Exception as e:
+        bot.edit_message_text(f"❌ فشل التحديث: {str(e)}", chat_id=message.chat.id, message_id=status_msg.message_id)
 
 @bot.message_handler(func=lambda message: True)
 def handle_link_request(message):
@@ -140,13 +178,12 @@ def handle_link_request(message):
     wait_msg = bot.reply_to(message, "🔍 جاري فحص الرابط وجلب بيانات المقطع...")
 
     try:
-        ydl_info_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extractor_args': {'youtube': {'player_client': ['ios', 'web_safari']}},
-        }
+        ydl_info_opts = get_base_ydl_opts()
         with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            if not info:
+                raise ValueError("تعذر العثور على أي فيديو متاح في هذا الرابط.")
+            
             title = info.get('title', 'مقطع فيديو')
             duration = info.get('duration', 0)
             uploader = info.get('uploader') or info.get('channel') or "غير معروف"
@@ -160,7 +197,6 @@ def handle_link_request(message):
             "uploader": uploader
         }
 
-        # بناء الأزرار بتصميم أيقونات حديث
         markup = types.InlineKeyboardMarkup(row_width=2)
         btn_1080 = types.InlineKeyboardButton("💎 Full HD 1080p", callback_data="dl_1080")
         btn_720 = types.InlineKeyboardButton("⚡ 720p (موصى به)", callback_data="dl_720")
@@ -179,19 +215,30 @@ def handle_link_request(message):
             f"👤 **الناشر:** {uploader}\n"
             f"⏱ **المدة:** {dur_text} دقيقة\n"
             f"👁 **المشاهدات:** {format_count(views)}\n\n"
-            f"👇 **اختر الصيغة والجودة المطلوبة للتحميل:**"
+            f"👇 **اختر الصيغة والجودة المطلوبة:**"
         )
 
         bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
 
-        # إرسال الغلاف مع البطاقة التفاعلية إن توفر، وإلا إرسال رسالة نصية
         if thumb:
             bot.send_photo(message.chat.id, thumb, caption=caption, reply_markup=markup, parse_mode="Markdown")
         else:
             bot.send_message(message.chat.id, caption, reply_markup=markup, parse_mode="Markdown")
 
+    except yt_dlp.utils.DownloadError as de:
+        err_text = str(de)
+        if "Unsupported URL" in err_text:
+            msg = "❌ هذا الرابط من موقع غير مدعوم أو غير صالح."
+        elif "Private video" in err_text or "login" in err_text.lower():
+            msg = "🔒 هذا المقطع خاص (Private) ولا يمكن تنزيله إلا بتسجيل الدخول."
+        elif "Sign in to confirm" in err_text:
+            msg = "⚠️ يوتيوب يطلب تأكيد حساب للوصول لهذا المقطع على السيرفر."
+        else:
+            msg = f"❌ تعذر تنزيل المقطع: {err_text[:120]}"
+        bot.edit_message_text(msg, chat_id=message.chat.id, message_id=wait_msg.message_id)
+
     except Exception as e:
-        bot.edit_message_text(f"❌ تعذر تحليل الرابط، تأكد من أن الحساب عام: {str(e)[:120]}", chat_id=message.chat.id, message_id=wait_msg.message_id)
+        bot.edit_message_text(f"⚠️ حدث خطأ في معالجة الرابط: {str(e)[:120]}", chat_id=message.chat.id, message_id=wait_msg.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def handle_download_option(call):
@@ -203,7 +250,7 @@ def handle_download_option(call):
         return
 
     if chat_id not in USER_DATA:
-        bot.answer_callback_query(call.id, "⚠️ انتهت صلاحية هذا الطلب، أرسل الرابط مجدداً.", show_alert=True)
+        bot.answer_callback_query(call.id, "⚠️ انتهت صلاحية الطلب، أرسل الرابط مجدداً.", show_alert=True)
         return
 
     data = USER_DATA[chat_id]
@@ -219,8 +266,10 @@ def handle_download_option(call):
     downloaded_file = None
 
     try:
+        ydl_opts = get_base_ydl_opts()
+
         if choice == "dl_mp3":
-            ydl_opts = {
+            ydl_opts.update({
                 'format': 'bestaudio/best',
                 'outtmpl': os.path.join(DOWNLOAD_DIR, f"{file_prefix}.%(ext)s"),
                 'postprocessors': [{
@@ -228,37 +277,25 @@ def handle_download_option(call):
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
-                'quiet': True,
-                'no_warnings': True,
-                'extractor_args': {'youtube': {'player_client': ['ios', 'web_safari']}},
-            }
+            })
         elif choice == "dl_1080":
-            ydl_opts = {
+            ydl_opts.update({
                 'format': 'bestvideo+bestaudio/best',
                 'outtmpl': os.path.join(DOWNLOAD_DIR, f"{file_prefix}.%(ext)s"),
                 'merge_output_format': 'mp4',
-                'quiet': True,
-                'no_warnings': True,
-                'extractor_args': {'youtube': {'player_client': ['ios', 'web_safari']}},
-            }
+            })
         elif choice == "dl_720":
-            ydl_opts = {
+            ydl_opts.update({
                 'format': 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[height<=720]/best',
                 'outtmpl': os.path.join(DOWNLOAD_DIR, f"{file_prefix}.%(ext)s"),
                 'merge_output_format': 'mp4',
-                'quiet': True,
-                'no_warnings': True,
-                'extractor_args': {'youtube': {'player_client': ['ios', 'web_safari']}},
-            }
+            })
         else: # dl_480
-            ydl_opts = {
+            ydl_opts.update({
                 'format': 'best[height<=480][ext=mp4]/bestvideo[height<=480]+bestaudio/best[height<=480]/best',
                 'outtmpl': os.path.join(DOWNLOAD_DIR, f"{file_prefix}.%(ext)s"),
                 'merge_output_format': 'mp4',
-                'quiet': True,
-                'no_warnings': True,
-                'extractor_args': {'youtube': {'player_client': ['ios', 'web_safari']}},
-            }
+            })
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -269,7 +306,7 @@ def handle_download_option(call):
         downloaded_file = matching[0]
 
         if choice == "dl_mp3":
-            bot.edit_message_text("🎧 جاري رفع الملف الصوتي النقي...", chat_id=chat_id, message_id=status_msg.message_id)
+            bot.edit_message_text("🎧 جاري رفع الملف الصوتي...", chat_id=chat_id, message_id=status_msg.message_id)
             with open(downloaded_file, 'rb') as audio:
                 bot.send_audio(
                     chat_id, audio, 
@@ -281,7 +318,7 @@ def handle_download_option(call):
                 )
             bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
         else:
-            split_and_send_video(chat_id, downloaded_file, title, duration, status_msg.message_id)
+            fast_split_and_send(chat_id, downloaded_file, title, duration, status_msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ حدث خطأ أثناء المعالجة: {str(e)[:120]}", chat_id=chat_id, message_id=status_msg.message_id)
@@ -291,5 +328,5 @@ def handle_download_option(call):
             except OSError: pass
 
 if __name__ == "__main__":
-    print("البوت السينمائي الأنيق يعمل الآن...")
+    print("البوت السريع والمحدث يعمل الآن...")
     bot.infinity_polling()

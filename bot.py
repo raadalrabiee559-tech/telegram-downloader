@@ -4,7 +4,6 @@ import glob
 import time
 import math
 import uuid
-import html
 import sqlite3
 import subprocess
 import threading
@@ -15,12 +14,25 @@ import telebot
 from telebot import apihelper, types
 import yt_dlp
 
-# 1. خادم ويب مصغر ليتعرف Render على أن الخدمة تعمل بنجاح
+# قراءة التوكن بذكاء وتنظيف أي مسافات زائدة
+raw_token = (
+    os.environ.get("BOT_TOKEN") 
+    or os.environ.get("bot_token") 
+    or os.environ.get("TOKEN") 
+    or ""
+).strip()
+
+BOT_STATUS = "Starting..."
+
+# 1. خادم ويب ذكي يعرض لك حالة البوت والتوكن مباشرة في المتصفح
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"VIP Bot is online and running securely!")
+        token_check = "✅ التوكن موجود ومقروء بنجاح" if raw_token else "❌ خطأ: متغير BOT_TOKEN غير موجود في Render!"
+        status_Report = f"حالة النظام:\n{token_check}\nحالة البوت: {BOT_STATUS}"
+        self.wfile.write(status_Report.encode("utf-8"))
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
@@ -29,7 +41,7 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-# 2. التنبيه الذاتي كل 10 دقائق لضمان بقاء السيرفر نشطاً 24 ساعة
+# 2. التنبيه الذاتي كل 10 دقائق
 def keep_alive_ping():
     while True:
         time.sleep(600)
@@ -51,7 +63,10 @@ def auto_update_ytdlp():
 
 threading.Thread(target=auto_update_ytdlp, daemon=True).start()
 
-# 4. منظف القرص الدوري التلقائي (يحذف أي ملف مؤقت أكبر من 10 دقائق)
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# 4. منظف القرص الدوري
 def auto_disk_cleaner():
     while True:
         time.sleep(600)
@@ -65,23 +80,19 @@ def auto_disk_cleaner():
 
 threading.Thread(target=auto_disk_cleaner, daemon=True).start()
 
-# 5. قراءة التوكن بأمان من متغيرات البيئة المشفرة في Render
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("⚠️ لم يتم العثور على BOT_TOKEN في متغيرات البيئة على Render!")
+if not raw_token:
+    BOT_STATUS = "متوقف لأن BOT_TOKEN غير مضاف في Environment على Render"
+    print(BOT_STATUS)
+    while True:
+        time.sleep(60)
 
 apihelper.CONNECT_TIMEOUT = 30
 apihelper.READ_TIMEOUT = 300
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(raw_token)
 
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-# طابور حماية الذاكرة (معالجة عمليتين فقط في نفس اللحظة لحماية رام 512MB)
 DOWNLOAD_SEMAPHORE = threading.Semaphore(2)
 INFO_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
-# قاعدة بيانات الكاش الذكي لتسريع الروابط المكررة في 0.1 ثانية
 DB_PATH = "media_cache.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -258,14 +269,9 @@ def fast_split_and_send(chat_id, file_path, title, total_duration, status_msg_id
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     welcome_text = (
-        "👑 أهلاً بك في محمل الوسائط السحابي VIP (النسخة الآمنة) 🚀\n\n"
+        "👑 أهلاً بك في محمل الوسائط السحابي VIP (النسخة الآمنة الشغالة) 🚀\n\n"
         "أرسل لي رابطاً واحداً أو روابط متعددة أو رسالة مشاركة كاملة:\n"
         "• YouTube • TikTok • Instagram • Facebook • X\n\n"
-        "💎 مميزات نسخة VIP:\n"
-        "├ ⚡ أرشيف ذكي فوري (0.1 ثانية للروابط المكررة)\n"
-        "├ 🚫 بدون علامة مائية لمقاطع تيك توك\n"
-        "├ 🛡️ حماية ضد التعليق والروابط الطويلة\n"
-        "└ ✂️ تقطيع فوري للمقاطع الضخمة\n\n"
         "👇 أرسل الرابط لتجربته الآن!"
     )
     bot.reply_to(message, welcome_text)
@@ -379,7 +385,6 @@ def handle_download_option(call):
     duration = data["duration"]
     uploader = data["uploader"]
 
-    # فحص الكاش الذكي أولاً
     cached = get_cached_file(url, choice)
     if cached:
         file_id, c_title, f_type = cached
@@ -466,5 +471,14 @@ def handle_download_option(call):
                 except OSError: pass
 
 if __name__ == "__main__":
-    print("VIP Bot (Secure Environment) is now running...")
-    bot.infinity_polling()
+    try:
+        me = bot.get_me()
+        BOT_STATUS = f"شغال ومتصل بنجاح بحساب @{me.username} ✅"
+        # إلغاء أي ويب هوك قديم عالق
+        bot.remove_webhook()
+        time.sleep(1)
+        bot.infinity_polling(skip_pending=True)
+    except Exception as err:
+        BOT_STATUS = f"❌ خطأ في التوكن أو الاتصال بتلجرام: {str(err)}"
+        while True:
+            time.sleep(60)

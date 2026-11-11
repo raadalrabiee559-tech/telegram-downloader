@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import re
 import glob
@@ -14,13 +15,13 @@ import telebot
 from telebot import apihelper, types
 import yt_dlp
 
-# قراءة التوكن بذكاء وتنظيف أي مسافات زائدة
+# قراءة التوكن بذكاء وتنظيف أي مسافات أو علامات تنصيص زائدة
 raw_token = (
     os.environ.get("BOT_TOKEN") 
     or os.environ.get("bot_token") 
     or os.environ.get("TOKEN") 
     or ""
-).strip()
+).strip().strip('"').strip("'")
 
 BOT_STATUS = "Starting..."
 
@@ -31,8 +32,8 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
         token_check = "✅ التوكن موجود ومقروء بنجاح" if raw_token else "❌ خطأ: متغير BOT_TOKEN غير موجود في Render!"
-        status_Report = f"حالة النظام:\n{token_check}\nحالة البوت: {BOT_STATUS}"
-        self.wfile.write(status_Report.encode("utf-8"))
+        status_report = f"حالة النظام:\n{token_check}\nحالة البوت: {BOT_STATUS}"
+        self.wfile.write(status_report.encode("utf-8"))
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
@@ -474,7 +475,6 @@ if __name__ == "__main__":
     try:
         me = bot.get_me()
         BOT_STATUS = f"شغال ومتصل بنجاح بحساب @{me.username} ✅"
-        # إلغاء أي ويب هوك قديم عالق
         bot.remove_webhook()
         time.sleep(1)
         bot.infinity_polling(skip_pending=True)

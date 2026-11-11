@@ -15,12 +15,12 @@ import telebot
 from telebot import apihelper, types
 import yt_dlp
 
-# 1. خادم مصغر لمنع Render من الخمول
+# 1. خادم ويب مصغر ليتعرف Render على أن الخدمة تعمل بنجاح
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"VIP Bot is online and running!")
+        self.wfile.write(b"VIP Bot is online and running securely!")
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
@@ -29,7 +29,7 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-# 2. التنبيه الذاتي كل 10 دقائق
+# 2. التنبيه الذاتي كل 10 دقائق لضمان بقاء السيرفر نشطاً 24 ساعة
 def keep_alive_ping():
     while True:
         time.sleep(600)
@@ -51,7 +51,7 @@ def auto_update_ytdlp():
 
 threading.Thread(target=auto_update_ytdlp, daemon=True).start()
 
-# 4. منظف القرص الدوري التلقائي
+# 4. منظف القرص الدوري التلقائي (يحذف أي ملف مؤقت أكبر من 10 دقائق)
 def auto_disk_cleaner():
     while True:
         time.sleep(600)
@@ -65,20 +65,23 @@ def auto_disk_cleaner():
 
 threading.Thread(target=auto_disk_cleaner, daemon=True).start()
 
-# 5. إعدادات تلجرام
+# 5. قراءة التوكن بأمان من متغيرات البيئة المشفرة في Render
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("⚠️ لم يتم العثور على BOT_TOKEN في متغيرات البيئة على Render!")
+
 apihelper.CONNECT_TIMEOUT = 30
 apihelper.READ_TIMEOUT = 300
-
-BOT_TOKEN = "9265561235:AAFyaR6rCz1xnZYHxTOP7eI5gOuDO5IVz9k"
 bot = telebot.TeleBot(BOT_TOKEN)
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# طابور حماية الذاكرة (معالجة عمليتين فقط في نفس اللحظة لحماية رام 512MB)
 DOWNLOAD_SEMAPHORE = threading.Semaphore(2)
 INFO_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
-# قاعدة بيانات الكاش الذكي
+# قاعدة بيانات الكاش الذكي لتسريع الروابط المكررة في 0.1 ثانية
 DB_PATH = "media_cache.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -156,8 +159,8 @@ def get_base_ydl_opts():
     opts = {
         'quiet': True,
         'no_warnings': True,
-        'noplaylist': True,       # منع فحص القوائم أو المواقع الكاملة حتى لا يعلق البوت
-        'playlist_items': '1',    # سحب أول فيديو فقط دائماً
+        'noplaylist': True,
+        'playlist_items': '1',
         'socket_timeout': 12,
         'retries': 2,
         'http_headers': {
@@ -171,14 +174,13 @@ def get_base_ydl_opts():
     return opts
 
 def fetch_video_info(url):
-    """دالة معزولة لفحص الرابط مع حماية ضد التعليق"""
     ydl_info_opts = get_base_ydl_opts()
     with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         if info and 'entries' in info:
             entries = list(info['entries'])
             if not entries:
-                raise ValueError("لا يوجد مقطع فيديو في هذا الرابط.")
+                raise ValueError("لا يوجد مقطع فيديو متاح في هذا الرابط.")
             info = entries[0]
         return info
 
@@ -193,17 +195,16 @@ def format_count(count):
 
 def fast_split_and_send(chat_id, file_path, title, total_duration, status_msg_id, url, quality):
     file_size = os.path.getsize(file_path)
-    safe_title = html.escape(title[:140])
+    clean_title = title[:140]
 
     if file_size <= 48 * 1024 * 1024:
         bot.edit_message_text("⚡ جاري الرفع لتلجرام بأقصى سرعة...", chat_id=chat_id, message_id=status_msg_id)
         with open(file_path, 'rb') as v:
             sent_msg = bot.send_video(
                 chat_id, v, 
-                caption=f"🎬 <b>{safe_title}</b>\n\n🤖 @raad_downloader_bot", 
+                caption=f"🎬 {clean_title}\n\n🤖 @raad_downloader_bot", 
                 duration=int(total_duration) if total_duration else None, 
-                supports_streaming=True,
-                parse_mode="HTML"
+                supports_streaming=True
             )
             if sent_msg.video:
                 save_to_cache(url, quality, sent_msg.video.file_id, title, "video")
@@ -215,7 +216,7 @@ def fast_split_and_send(chat_id, file_path, title, total_duration, status_msg_id
     chunk_duration = math.ceil(total_duration / num_parts) if total_duration else 180
 
     bot.edit_message_text(
-        f"✂️ حجم المقطع ({file_size / (1024*1024):.1f}MB) كبير.\n⚡ جاري التقطيع الفوري لـ {num_parts} أجزاء ورفعها...", 
+        f"✂️ حجم المقطع ({file_size / (1024*1024):.1f}MB) يتجاوز حد تلجرام.\n⚡ جاري التقطيع الفوري لـ {num_parts} أجزاء ورفعها...", 
         chat_id=chat_id, message_id=status_msg_id
     )
 
@@ -242,10 +243,9 @@ def fast_split_and_send(chat_id, file_path, title, total_duration, status_msg_id
                     bot.send_video(
                         chat_id, 
                         part_v, 
-                        caption=f"🎬 <b>{safe_title[:100]}</b>\n📦 <b>الجزء ({i+1}/{num_parts})</b>\n\n🤖 @raad_downloader_bot",
+                        caption=f"🎬 {clean_title[:100]}\n📦 الجزء ({i+1}/{num_parts})\n\n🤖 @raad_downloader_bot",
                         duration=int(chunk_duration),
-                        supports_streaming=True,
-                        parse_mode="HTML"
+                        supports_streaming=True
                     )
 
         bot.delete_message(chat_id=chat_id, message_id=status_msg_id)
@@ -258,24 +258,24 @@ def fast_split_and_send(chat_id, file_path, title, total_duration, status_msg_id
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     welcome_text = (
-        "👑 <b>أهلاً بك في محمل الوسائط السحابي VIP!</b> 🚀\n\n"
-        "أرسل لي رابطاً واحداً أو روابط متعددة أو نصاً طويلاً:\n"
+        "👑 أهلاً بك في محمل الوسائط السحابي VIP (النسخة الآمنة) 🚀\n\n"
+        "أرسل لي رابطاً واحداً أو روابط متعددة أو رسالة مشاركة كاملة:\n"
         "• YouTube • TikTok • Instagram • Facebook • X\n\n"
-        "💎 <b>مميزات نسخة VIP:</b>\n"
+        "💎 مميزات نسخة VIP:\n"
         "├ ⚡ أرشيف ذكي فوري (0.1 ثانية للروابط المكررة)\n"
         "├ 🚫 بدون علامة مائية لمقاطع تيك توك\n"
-        "├ 🛡️ حماية ضد التعليق والرموز الخاصة\n"
+        "├ 🛡️ حماية ضد التعليق والروابط الطويلة\n"
         "└ ✂️ تقطيع فوري للمقاطع الضخمة\n\n"
-        "👇 <b>شارك أي رابط لتجربته الآن!</b>"
+        "👇 أرسل الرابط لتجربته الآن!"
     )
-    bot.reply_to(message, welcome_text, parse_mode="HTML")
+    bot.reply_to(message, welcome_text)
 
 @bot.message_handler(commands=['update'])
 def manual_update(message):
     status_msg = bot.reply_to(message, "⏳ جاري فحص وتحديث مكتبة التحميل لأحدث إصدار...")
     try:
         subprocess.run(["pip", "install", "--upgrade", "yt-dlp"], capture_output=True, text=True)
-        bot.edit_message_text("✅ <b>تم تحديث محرك التحميل بنجاح لأحدث إصدار رسمي!</b>", chat_id=message.chat.id, message_id=status_msg.message_id, parse_mode="HTML")
+        bot.edit_message_text("✅ تم تحديث محرك التحميل بنجاح لأحدث إصدار رسمي!", chat_id=message.chat.id, message_id=status_msg.message_id)
     except Exception as e:
         bot.edit_message_text(f"❌ فشل التحديث: {str(e)}", chat_id=message.chat.id, message_id=status_msg.message_id)
 
@@ -289,11 +289,10 @@ def handle_link_request(message):
 
     urls = urls[:5]
     total = len(urls)
-    status_msg = bot.reply_to(message, f"🔍 تم العثور على ({total}) روابط، جاري فحصها واستخراج بطاقات التحميل...")
+    status_msg = bot.reply_to(message, f"🔍 تم العثور على ({total}) روابط، جاري فحصها واستخراج خيارات التحميل...")
 
     for idx, url in enumerate(urls, 1):
         try:
-            # تشغيل الفحص مع مؤقت قاطع (20 ثانية بحد أقصى) لمنع التعليق نهائياً
             future = INFO_EXECUTOR.submit(fetch_video_info, url)
             info = future.result(timeout=20)
 
@@ -301,9 +300,9 @@ def handle_link_request(message):
                 bot.send_message(message.chat.id, f"⚠️ الرابط ({idx}) لا يحتوي على فيديو قابل للتحميل.")
                 continue
 
-            title = info.get('title') or 'مقطع فيديو'
+            title = str(info.get('title') or 'مقطع فيديو')
             duration = info.get('duration') or 0
-            uploader = info.get('uploader') or info.get('channel') or "غير معروف"
+            uploader = str(info.get('uploader') or info.get('channel') or "غير معروف")
             views = info.get('view_count') or 0
             thumb = info.get('thumbnail')
 
@@ -328,30 +327,21 @@ def handle_link_request(message):
             markup.add(btn_close)
 
             dur_text = f"{int(duration // 60)}:{int(duration % 60):02d}" if duration else "غير محدد"
-            
-            # تنظيف النصوص من الرموز لمنع خطأ 400 Bad Request في تلجرام
-            safe_title = html.escape(title[:110])
-            safe_uploader = html.escape(str(uploader)[:50])
-
             caption = (
-                f"🎬 <b>[{idx}/{total}] {safe_title}</b>\n\n"
-                f"👤 <b>الناشر:</b> {safe_uploader}\n"
-                f"⏱ <b>المدة:</b> {dur_text} دقيقة\n"
-                f"👁 <b>المشاهدات:</b> {format_count(views)}\n\n"
-                f"👇 <b>اختر صيغة التحميل المطلوبة:</b>"
+                f"🎬 [{idx}/{total}] {title[:110]}\n\n"
+                f"👤 الناشر: {uploader[:50]}\n"
+                f"⏱ المدة: {dur_text} دقيقة\n"
+                f"👁 المشاهدات: {format_count(views)}\n\n"
+                f"👇 اختر صيغة التحميل المطلوبة:"
             )
 
-            # محاولة إرسال الغلاف، وإذا رفض تلجرام رابط صورة تيك توك يرسل البطاقة النصية فوراً
-            sent_card = False
-            if thumb:
+            if thumb and 'tiktok.com' not in url.lower():
                 try:
-                    bot.send_photo(message.chat.id, thumb, caption=caption, reply_markup=markup, parse_mode="HTML")
-                    sent_card = True
+                    bot.send_photo(message.chat.id, thumb, caption=caption, reply_markup=markup)
                 except Exception:
-                    sent_card = False
-
-            if not sent_card:
-                bot.send_message(message.chat.id, caption, reply_markup=markup, parse_mode="HTML")
+                    bot.send_message(message.chat.id, caption, reply_markup=markup)
+            else:
+                bot.send_message(message.chat.id, caption, reply_markup=markup)
 
         except FuturesTimeoutError:
             bot.send_message(message.chat.id, f"⏱ انتهت مهلة فحص الرابط ({idx}): هذا الموقع بطيء جداً أو لا يحتوي على فيديو مباشر.")
@@ -360,7 +350,7 @@ def handle_link_request(message):
             if "Unsupported URL" in err_str:
                 bot.send_message(message.chat.id, f"❌ الرابط ({idx}) هو صفحة موقع عامة وليس رابط فيديو مدعوم.")
             else:
-                bot.send_message(message.chat.id, f"⚠️ تعذر تحليل الرابط ({idx}): تأكد من أنه رابط فيديو عام وصحيح.")
+                bot.send_message(message.chat.id, f"⚠️ تعذر استخراج الفيديو من الرابط ({idx}): تأكد من أن الفيديو عام ومتاح.")
 
     try:
         bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
@@ -388,22 +378,20 @@ def handle_download_option(call):
     title = data["title"]
     duration = data["duration"]
     uploader = data["uploader"]
-    safe_title = html.escape(title[:140])
 
-    # 1. فحص الكاش الذكي أولاً
+    # فحص الكاش الذكي أولاً
     cached = get_cached_file(url, choice)
     if cached:
         file_id, c_title, f_type = cached
-        safe_c_title = html.escape(c_title[:140])
         bot.answer_callback_query(call.id, "⚡ جلب فوري من الأرشيف السحابي (0.1 ثانية)!")
         if f_type == "audio":
-            bot.send_audio(chat_id, file_id, caption=f"🎵 <b>{safe_c_title}</b>\n⚡ (أرشيف سحابي فوري 🚀)\n\n🤖 @raad_downloader_bot", parse_mode="HTML")
+            bot.send_audio(chat_id, file_id, caption=f"🎵 {c_title[:140]}\n⚡ (أرشيف سحابي فوري 🚀)\n\n🤖 @raad_downloader_bot")
         else:
-            bot.send_video(chat_id, file_id, caption=f"🎬 <b>{safe_c_title}</b>\n⚡ (أرشيف سحابي فوري 🚀)\n\n🤖 @raad_downloader_bot", parse_mode="HTML")
+            bot.send_video(chat_id, file_id, caption=f"🎬 {c_title[:140]}\n⚡ (أرشيف سحابي فوري 🚀)\n\n🤖 @raad_downloader_bot")
         return
 
     bot.answer_callback_query(call.id, "🚀 جاري التحميل والمعالجة...")
-    status_msg = bot.send_message(chat_id, f"⚡ <b>جاري سحب ومعالجة:</b> <code>{html.escape(title[:50])}...</code>", parse_mode="HTML")
+    status_msg = bot.send_message(chat_id, f"⚡ جاري سحب ومعالجة: {title[:50]}...")
 
     file_prefix = f"{chat_id}_{req_id}_{int(time.time())}"
     downloaded_file = None
@@ -423,7 +411,6 @@ def handle_download_option(call):
                     }],
                 })
             elif 'tiktok.com' in url.lower():
-                # صيغة متوافقة ومضمونة لمقاطع تيك توك بدون علامة مائية
                 ydl_opts.update({
                     'format': 'best[ext=mp4]/best',
                     'outtmpl': os.path.join(DOWNLOAD_DIR, f"{file_prefix}.%(ext)s"),
@@ -463,8 +450,7 @@ def handle_download_option(call):
                         title=title[:100], 
                         performer=str(uploader)[:50],
                         duration=int(duration) if duration else None, 
-                        caption=f"🎵 <b>{safe_title}</b>\n\n🤖 @raad_downloader_bot",
-                        parse_mode="HTML"
+                        caption=f"🎵 {title[:140]}\n\n🤖 @raad_downloader_bot"
                     )
                     if sent.audio:
                         save_to_cache(url, choice, sent.audio.file_id, title, "audio")
@@ -473,12 +459,12 @@ def handle_download_option(call):
                 fast_split_and_send(chat_id, downloaded_file, title, duration, status_msg.message_id, url, choice)
 
         except Exception as e:
-            bot.edit_message_text(f"❌ تعذر تنزيل المقطع: تأكد من أن الرابط صالح وعام.", chat_id=chat_id, message_id=status_msg.message_id)
+            bot.edit_message_text("❌ تعذر تنزيل المقطع: تأكد من أن الرابط صالح وعام.", chat_id=chat_id, message_id=status_msg.message_id)
         finally:
             if downloaded_file and os.path.exists(downloaded_file):
                 try: os.remove(downloaded_file)
                 except OSError: pass
 
 if __name__ == "__main__":
-    print("البوت السحابي VIP المحصن ضد أخطاء 400 والتعليق يعمل الآن...")
+    print("VIP Bot (Secure Environment) is now running...")
     bot.infinity_polling()
